@@ -16,6 +16,9 @@ if [ -z "$NTFY_TOPIC" ]; then
   exit 1
 fi
 
+# Token de sécurité — généré à l'install, jamais partagé
+TOKEN=$(openssl rand -hex 12)
+
 echo ""
 echo "✅ Canal : $NTFY_TOPIC"
 echo "📁 Installation en cours..."
@@ -31,6 +34,7 @@ cat > "$CLAUDE_DIR/approval-server.js" << 'SERVEREOF'
 const http = require("http");
 
 const NTFY_TOPIC = "__NTFY_TOPIC__";
+const TOKEN = "__TOKEN__";
 const PORT = 7878;
 const TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -55,6 +59,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === "GET" && url.pathname === "/yes") {
+    if (url.searchParams.get("token") !== TOKEN) { res.writeHead(403); res.end("Forbidden"); return; }
     if (pendingRequest) { pendingRequest.resolve(true); pendingRequest = null; }
     res.writeHead(200, { "Content-Type": "text/html" });
     res.end("<h2 style='font-family:sans-serif;color:green;padding:40px'>OUI - Claude continue.</h2>");
@@ -62,6 +67,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === "GET" && url.pathname === "/no") {
+    if (url.searchParams.get("token") !== TOKEN) { res.writeHead(403); res.end("Forbidden"); return; }
     if (pendingRequest) { pendingRequest.resolve(false); pendingRequest = null; }
     res.writeHead(200, { "Content-Type": "text/html" });
     res.end("<h2 style='font-family:sans-serif;color:red;padding:40px'>NON - Claude abandonne.</h2>");
@@ -81,7 +87,7 @@ async function sendNtfy(tool, action) {
         "Title": "Claude - Action sensible",
         "Priority": "high",
         "Tags": "warning",
-        "Actions": `view, OUI, http://${localIP}:${PORT}/yes; view, NON, http://${localIP}:${PORT}/no`,
+        "Actions": `view, OUI, http://${localIP}:${PORT}/yes?token=${TOKEN}; view, NON, http://${localIP}:${PORT}/no?token=${TOKEN}`,
         "Content-Type": "text/plain",
       },
       body: `[${tool}] ${action}`,
@@ -117,8 +123,9 @@ server.listen(PORT, () => {
 });
 SERVEREOF
 
-# Injecter le canal dans le serveur
+# Injecter le canal et le token
 sed -i "" "s/__NTFY_TOPIC__/$NTFY_TOPIC/g" "$CLAUDE_DIR/approval-server.js"
+sed -i "" "s/__TOKEN__/$TOKEN/g" "$CLAUDE_DIR/approval-server.js"
 
 # ─── 2. pre-tool-use.sh ──────────────────────────────────────────────────────
 cat > "$HOOKS_DIR/pre-tool-use.sh" << 'HOOKEOF'
@@ -154,6 +161,11 @@ HOOKEOF
 chmod +x "$HOOKS_DIR/pre-tool-use.sh"
 
 # ─── 3. settings.json global ─────────────────────────────────────────────────
+if [ -f "$CLAUDE_DIR/settings.json" ]; then
+  cp "$CLAUDE_DIR/settings.json" "$CLAUDE_DIR/settings.json.backup"
+  echo "   ⚠️  settings.json existant sauvegardé → settings.json.backup"
+fi
+
 cat > "$CLAUDE_DIR/settings.json" << 'SETTINGSEOF'
 {
   "permissions": {
@@ -205,7 +217,6 @@ SETTINGSEOF
 PLIST="$HOME/Library/LaunchAgents/com.claude-approval.plist"
 NODE_PATH=$(which node)
 
-# Décharger si déjà installé
 launchctl unload "$PLIST" 2>/dev/null || true
 
 cat > "$PLIST" << PLISTEOF
