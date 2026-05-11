@@ -148,6 +148,11 @@ cat > "$HOOKS_DIR/pre-tool-use.sh" << 'HOOKEOF'
 
 SERVER="http://localhost:7878"
 
+if ! command -v python3 &>/dev/null; then
+  echo '{"decision":"block","reason":"python3 required by pre-tool-use.sh but not found"}'
+  exit 1
+fi
+
 # ── Parse stdin ────────────────────────────────────────────────────────────────
 TMPFILE=$(mktemp)
 cat > "$TMPFILE"
@@ -184,6 +189,16 @@ block() {
 
 ask() {
   log "[VALIDATION] $TOOL : $1"
+
+  if ! curl -s --max-time 1 "$SERVER/health" &>/dev/null; then
+    log "[server] Demarrage approval-server..."
+    node ~/.claude/approval-server.js >> ~/.claude/approval-server.log 2>&1 &
+    for i in 1 2 3 4 5; do
+      sleep 1
+      curl -s --max-time 1 "$SERVER/health" &>/dev/null && break
+    done
+  fi
+
   local PAYLOAD
   PAYLOAD=$(python3 -c "
 import json, sys
@@ -195,8 +210,15 @@ print(json.dumps({'tool': sys.argv[1], 'action': sys.argv[2][:300]}))
     -H "Content-Type: application/json" \
     -d "$PAYLOAD")
 
+  if [ -z "$RESPONSE" ]; then
+    log "[WARN] Serveur injoignable — auto-approuve : $TOOL"
+    echo '{"decision":"approve"}'
+    exit 0
+  fi
+
   if echo "$RESPONSE" | grep -q '"approved":true'; then
     log "[OK] Approuve"
+    echo '{"decision":"approve"}'
     exit 0
   else
     log "[REFUSE] Refuse par l'utilisateur"
@@ -207,6 +229,7 @@ print(json.dumps({'tool': sys.argv[1], 'action': sys.argv[2][:300]}))
 
 auto() {
   log "[AUTO] $TOOL${1:+ : $1}"
+  echo '{"decision":"approve"}'
   exit 0
 }
 
@@ -400,7 +423,8 @@ if [[ "$TOOL" == "Bash" ]]; then
     ask "$COMMAND"
   fi
 
-  auto "$COMMAND"
+  # ── 4. AMBIGUOUS — command doesn't match any tier → ask ───────────────────
+  ask "Commande non classifiee : $COMMAND"
 
 fi
 
@@ -414,60 +438,67 @@ if [[ "$TOOL" =~ ^(Read|Edit|Write|MultiEdit)$ ]]; then
   auto
 fi
 
-# ── Tous les autres outils (MCP, etc.) → AUTO ─────────────────────────────────
-auto
+# ── Outil non classifie → notification ────────────────────────────────────────
+ask "Outil non classifie : $TOOL"
 HOOKEOF
 
 chmod +x "$HOOKS_DIR/pre-tool-use.sh"
 
-# ─── 3. settings.json global ─────────────────────────────────────────────────
+# ─── 3. settings.json global (merge, never overwrite) ────────────────────────
 if [ -f "$CLAUDE_DIR/settings.json" ]; then
   cp "$CLAUDE_DIR/settings.json" "$CLAUDE_DIR/settings.json.backup"
-  echo "   ⚠️  settings.json existant sauvegardé → settings.json.backup"
+  echo "   📋 settings.json existant sauvegardé → settings.json.backup"
 fi
 
-cat > "$CLAUDE_DIR/settings.json" << 'SETTINGSEOF'
-{
-  "permissions": {
-    "allow": [
-      "Read(*)",
-      "Edit(*)",
-      "Write(*)",
-      "Bash(*)"
-    ],
-    "deny": [
-      "Bash(rm -rf *)",
-      "Bash(rm -fr *)",
-      "Bash(rm -Rf *)",
-      "Bash(rm -rF *)",
-      "Bash(git push --force *)",
-      "Bash(git push --force)",
-      "Bash(git push --force-with-lease *)",
-      "Bash(git push --force-with-lease)",
-      "Bash(git reset --hard *)",
-      "Bash(git reset --hard)",
-      "Bash(git clean *)",
-      "Bash(find * -delete *)",
-      "Bash(sudo *)",
-      "Bash(chmod -R *)",
-      "Bash(chown -R *)"
-    ]
-  },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ~/.claude/hooks/pre-tool-use.sh"
-          }
-        ]
-      }
-    ]
-  }
+python3 << 'MERGEEOF'
+import json, os
+
+path = os.path.expanduser("~/.claude/settings.json")
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    cfg = {}
+
+cfg.setdefault("permissions", {})
+cfg["permissions"].setdefault("allow", [])
+cfg["permissions"].setdefault("deny", [])
+
+needed_allow = ["Read(*)", "Edit(*)", "Write(*)", "Bash(*)"]
+for rule in needed_allow:
+    if rule not in cfg["permissions"]["allow"]:
+        cfg["permissions"]["allow"].append(rule)
+
+needed_deny = [
+    "Bash(rm -rf *)", "Bash(rm -fr *)", "Bash(rm -Rf *)", "Bash(rm -rF *)",
+    "Bash(git push --force *)", "Bash(git push --force)",
+    "Bash(git push --force-with-lease *)", "Bash(git push --force-with-lease)",
+    "Bash(git reset --hard *)", "Bash(git reset --hard)",
+    "Bash(git clean *)", "Bash(find * -delete *)",
+    "Bash(sudo *)", "Bash(chmod -R *)", "Bash(chown -R *)"
+]
+for rule in needed_deny:
+    if rule not in cfg["permissions"]["deny"]:
+        cfg["permissions"]["deny"].append(rule)
+
+hook_entry = {
+    "matcher": "*",
+    "hooks": [{"type": "command", "command": "bash ~/.claude/hooks/pre-tool-use.sh"}]
 }
-SETTINGSEOF
+cfg.setdefault("hooks", {})
+cfg["hooks"].setdefault("PreToolUse", [])
+hook_exists = any(
+    any(h.get("command", "").endswith("pre-tool-use.sh") for h in entry.get("hooks", []))
+    for entry in cfg["hooks"]["PreToolUse"]
+)
+if not hook_exists:
+    cfg["hooks"]["PreToolUse"].append(hook_entry)
+
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2)
+
+print("   ✅ settings.json mis à jour (permissions + hook ajoutés, config existante préservée)")
+MERGEEOF
 
 # ─── 4. LaunchAgent macOS — démarrage automatique ────────────────────────────
 PLIST="$HOME/Library/LaunchAgents/com.claude-approval.plist"
