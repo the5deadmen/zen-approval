@@ -1,8 +1,8 @@
 # zen-approval
 
-Stop clicking "yes" all day. Get a push notification on your phone instead.
+Stop clicking "yes" all day. Get a push notification on your phone — or approve directly from the terminal.
 
-When Claude Code wants to do something risky (git push, rm, writing .env files), your phone gets a notification with **YES / NO** buttons. Everything else runs without asking.
+When Claude Code wants to do something risky (git push, rm, writing .env files), you get a notification on your phone with **YES / NO** buttons AND clickable approval links in the terminal. First response wins. Everything else runs without asking.
 
 ---
 
@@ -19,6 +19,26 @@ The script will ask for your ntfy channel name, then set up everything automatic
 - Claude Code
 - [ntfy](https://ntfy.sh) app on your phone (iOS / Android) — free, no account needed
 - Same WiFi network as your Mac
+
+---
+
+## Dual-channel approval
+
+When a risky action is detected, the terminal shows:
+
+```
+────────────────────────────────────────
+  APPROBATION REQUISE
+  [Bash] git push origin main
+
+  OUI → http://192.168.1.x:7878/yes?token=...
+  NON → http://192.168.1.x:7878/no?token=...
+
+  En attente (tel ou lien ci-dessus)...
+────────────────────────────────────────
+```
+
+Click the link in the terminal or tap the notification on your phone. First response wins.
 
 ---
 

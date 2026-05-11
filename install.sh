@@ -36,7 +36,25 @@ const TOKEN      = "__TOKEN__";
 const PORT       = 7878;
 const TIMEOUT_MS = 5 * 60 * 1000;
 
-let pendingRequest = null;
+let pendingResolvers = [];
+let pendingResult = null;
+let pendingTimer = null;
+
+function resolveAll(approved) {
+  if (pendingResult !== null) return;
+  pendingResult = approved;
+  if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+  console.log(approved ? "[OK] Approuve" : "[REFUSE] Refuse");
+  for (const r of pendingResolvers) r(approved);
+  pendingResolvers = [];
+}
+
+function resetPending() {
+  if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+  for (const r of pendingResolvers) r(false);
+  pendingResolvers = [];
+  pendingResult = null;
+}
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
@@ -47,10 +65,36 @@ const server = http.createServer((req, res) => {
     req.on("end", async () => {
       const { action, tool } = JSON.parse(body);
       console.log(`\n[ACTION] [${tool}] ${action}`);
+
+      resetPending();
+
+      pendingTimer = setTimeout(() => {
+        console.log("[timeout] Refuse automatiquement apres 5 min");
+        resolveAll(false);
+      }, TIMEOUT_MS);
+
       await sendNtfy(tool, action);
-      const approved = await waitForAnswer();
-      console.log(approved ? "[OK] Approuve" : "[REFUSE] Refuse");
-      res.writeHead(200);
+
+      const localIP = getLocalIP();
+      const yesURL = `http://${localIP}:${PORT}/yes?token=${TOKEN}`;
+      const noURL  = `http://${localIP}:${PORT}/no?token=${TOKEN}`;
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ yesUrl: yesURL, noUrl: noURL }));
+    });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/wait") {
+    if (pendingResult !== null) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ approved: pendingResult }));
+      return;
+    }
+    new Promise((resolve) => {
+      pendingResolvers.push(resolve);
+    }).then((approved) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ approved }));
     });
     return;
@@ -62,7 +106,7 @@ const server = http.createServer((req, res) => {
       res.end("403 Forbidden");
       return;
     }
-    if (pendingRequest) { pendingRequest.resolve(true); pendingRequest = null; }
+    resolveAll(true);
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end("<h2 style='font-family:sans-serif;color:green;padding:40px'>OUI — Claude continue.</h2>");
     return;
@@ -74,7 +118,7 @@ const server = http.createServer((req, res) => {
       res.end("403 Forbidden");
       return;
     }
-    if (pendingRequest) { pendingRequest.resolve(false); pendingRequest = null; }
+    resolveAll(false);
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end("<h2 style='font-family:sans-serif;color:red;padding:40px'>NON — Claude abandonne.</h2>");
     return;
@@ -110,17 +154,6 @@ async function sendNtfy(tool, action) {
   } catch (e) {
     console.error("[ntfy] Erreur:", e.message);
   }
-}
-
-function waitForAnswer() {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      pendingRequest = null;
-      console.log("[timeout] Refuse automatiquement apres 5 min");
-      resolve(false);
-    }, TIMEOUT_MS);
-    pendingRequest = { resolve: (val) => { clearTimeout(timer); resolve(val); } };
-  });
 }
 
 function getLocalIP() {
@@ -205,10 +238,35 @@ import json, sys
 print(json.dumps({'tool': sys.argv[1], 'action': sys.argv[2][:300]}))
 " "$TOOL" "$1" 2>/dev/null)
 
-  local RESPONSE
-  RESPONSE=$(curl -s --max-time 310 -X POST "$SERVER/ask" \
+  local ASK_RESPONSE
+  ASK_RESPONSE=$(curl -s --max-time 10 -X POST "$SERVER/ask" \
     -H "Content-Type: application/json" \
     -d "$PAYLOAD")
+
+  if [ -z "$ASK_RESPONSE" ]; then
+    log "[WARN] Serveur injoignable — auto-approuve : $TOOL"
+    echo '{"decision":"approve"}'
+    exit 0
+  fi
+
+  local YES_URL NO_URL
+  YES_URL=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('yesUrl',''))" "$ASK_RESPONSE" 2>/dev/null)
+  NO_URL=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('noUrl',''))" "$ASK_RESPONSE" 2>/dev/null)
+
+  log ""
+  log "────────────────────────────────────────"
+  log "  APPROBATION REQUISE"
+  log "  [$TOOL] $1"
+  log ""
+  log "  OUI → $YES_URL"
+  log "  NON → $NO_URL"
+  log ""
+  log "  En attente (tel ou lien ci-dessus)..."
+  log "────────────────────────────────────────"
+  log ""
+
+  local RESPONSE
+  RESPONSE=$(curl -s --max-time 310 "$SERVER/wait")
 
   if [ -z "$RESPONSE" ]; then
     log "[WARN] Serveur injoignable — auto-approuve : $TOOL"
