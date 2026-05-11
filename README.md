@@ -45,10 +45,9 @@ The script will ask for your ntfy channel name, then set up everything automatic
 - `npm run build`, `npm test`, `npm start`
 - `Read`, `Edit`, `ls`, `mkdir`, `cp`, `mv`
 
-**Ambiguous** — command or tool doesn't match any tier → sends a notification:
-- Unrecognized Bash commands
-- Unknown tools (MCP, custom, etc.)
-- Anything the hook can't confidently classify
+**Ambiguous** — unrecognized Bash command → sends a notification:
+- Bash commands that don't match any tier above
+- MCP tools and other non-Bash tools pass silently
 
 ---
 

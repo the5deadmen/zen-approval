@@ -438,8 +438,8 @@ if [[ "$TOOL" =~ ^(Read|Edit|Write|MultiEdit)$ ]]; then
   auto
 fi
 
-# ── Outil non classifie → notification ────────────────────────────────────────
-ask "Outil non classifie : $TOOL"
+# ── Tous les autres outils (MCP, etc.) → AUTO ─────────────────────────────────
+auto
 HOOKEOF
 
 chmod +x "$HOOKS_DIR/pre-tool-use.sh"
